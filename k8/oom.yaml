@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-demo
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-demo
+  template:
+    metadata:
+      labels:
+        app: oom-demo
+    spec:
+      containers:
+      - name: app
+        image: python:3.12-slim
+        command:
+        - python
+        - -c
+        - |
+          data = []
+          while True:
+              data.append("x" * 1024 * 1024)
+        resources:
+          limits:
+            memory: "64Mi"
+          requests:
+            memory: "32Mi"
