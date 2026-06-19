@@ -124,3 +124,4 @@ evidence first, then the model analyzes that evidence. The LLM also does not
 invent executable actions or execute actions directly; Python generates and
 validates candidates, target, namespace, root-cause fit, and risk before asking
 the user for approval.
+
