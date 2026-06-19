@@ -294,8 +294,10 @@ class KubernetesInvestigator:
             f"Host IP: {status.host_ip or '<none>'}",
             f"Node Selector: {spec.node_selector or '<none>'}",
             f"Restart Policy: {spec.restart_policy or '<unknown>'}",
-            "Conditions:",
+            "Owner References:",
         ]
+        lines.extend(self._describe_owner_references(metadata.owner_references or []))
+        lines.append("Conditions:")
         lines.extend(self._describe_pod_conditions(status.conditions or []))
         lines.append("Tolerations:")
         lines.extend(self._describe_tolerations(spec.tolerations or []))
@@ -342,6 +344,22 @@ class KubernetesInvestigator:
             ]
         )
         return lines
+
+    def _describe_owner_references(
+        self,
+        owner_references: list[client.V1OwnerReference],
+    ) -> list[str]:
+        """Format pod owner references for remediation planning."""
+        if not owner_references:
+            return ["  <none>"]
+
+        return [
+            "  - "
+            f"Kind: {owner.kind}, "
+            f"Name: {owner.name}, "
+            f"Controller: {owner.controller}"
+            for owner in owner_references
+        ]
 
     def _describe_pod_conditions(
         self,

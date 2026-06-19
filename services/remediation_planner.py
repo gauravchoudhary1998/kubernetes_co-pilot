@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any
+
+from models.investigation_context import InvestigationContext
+from models.remediation_plan import (
+    RemediationAction,
+    RemediationCandidate,
+    RemediationPlan,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
+SUPPORTED_ACTION_TYPES = {"DELETE_POD", "RESTART_DEPLOYMENT"}
+SUPPORTED_RISK_LEVELS = {"LOW", "MEDIUM", "HIGH"}
+RISK_ORDER = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+
+
+class RemediationPlanner:
+    """Parses and validates LLM remediation recommendations."""
+
+    def parse(
+        self,
+        llm_response: str,
+        context: InvestigationContext,
+        candidates: list[RemediationCandidate],
+    ) -> RemediationPlan:
+        """Parse the remediation JSON block from an LLM response."""
+        raw_json = self._extract_json_block(llm_response)
+        if raw_json is None:
+            return RemediationPlan(
+                actions=[],
+                parse_error="No REMEDIATION_PLAN_JSON block was found in the LLM response.",
+            )
+
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            LOGGER.warning("Failed to parse remediation JSON: %s", exc)
+            return RemediationPlan(
+                actions=[],
+                parse_error=f"Remediation JSON was malformed: {exc}",
+            )
+
+        raw_actions = payload.get("actions", [])
+        if not isinstance(raw_actions, list):
+            return RemediationPlan(
+                actions=[],
+                parse_error="Remediation JSON field 'actions' must be a list.",
+            )
+
+        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        actions = [
+            self._validate_action(
+                raw_action=raw_action,
+                context=context,
+                candidate_by_id=candidate_by_id,
+            )
+            for raw_action in raw_actions
+            if isinstance(raw_action, dict)
+        ]
+        return RemediationPlan(actions=actions)
+
+    def _extract_json_block(self, llm_response: str) -> str | None:
+        """Extract a fenced JSON block from the LLM response."""
+        patterns = (
+            r"REMEDIATION_PLAN_JSON\s*```json\s*(.*?)```",
+            r"```json\s*(.*?)```",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, llm_response, re.DOTALL | re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def _validate_action(
+        self,
+        raw_action: dict[str, Any],
+        context: InvestigationContext,
+        candidate_by_id: dict[str, RemediationCandidate],
+    ) -> RemediationAction:
+        """Validate one LLM-proposed action against local safety policy."""
+        candidate_id = str(raw_action.get("candidate_id") or "").strip()
+        candidate = candidate_by_id.get(candidate_id)
+        if candidate is None:
+            return self._unknown_candidate_action(raw_action, context)
+
+        action_type = candidate.action_type
+        risk_level = self._normalize(raw_action.get("risk_level")) or candidate.risk_level
+        if risk_level not in SUPPORTED_RISK_LEVELS:
+            risk_level = candidate.risk_level
+
+        risk_level = self._policy_risk(
+            action_type=action_type,
+            risk_level=risk_level,
+            candidate=candidate,
+        )
+        executable, policy_reason = self._execution_policy(
+            candidate=candidate,
+            action_type=action_type,
+            risk_level=risk_level,
+            context=context,
+        )
+
+        return RemediationAction(
+            candidate_id=candidate.candidate_id,
+            action_type=action_type,
+            risk_level=risk_level,
+            action_category=candidate.action_category,
+            description=str(raw_action.get("description") or candidate.description).strip(),
+            rationale=str(raw_action.get("rationale") or candidate.rationale).strip(),
+            target_kind=candidate.target_kind,
+            target_name=candidate.target_name,
+            namespace=candidate.namespace,
+            solves_root_cause=candidate.solves_root_cause,
+            parameters=candidate.parameters,
+            executable=executable,
+            policy_reason=policy_reason,
+        )
+
+    def _unknown_candidate_action(
+        self,
+        raw_action: dict[str, Any],
+        context: InvestigationContext,
+    ) -> RemediationAction:
+        """Return a safe action for an LLM-selected unknown candidate."""
+        candidate_id = str(raw_action.get("candidate_id") or "UNKNOWN").strip()
+        return RemediationAction(
+            candidate_id=candidate_id,
+            action_type="UNKNOWN",
+            risk_level="HIGH",
+            action_category="UNKNOWN",
+            description=str(raw_action.get("description") or "").strip(),
+            rationale=(
+                "The LLM selected an action candidate that was not generated by "
+                "local remediation policy."
+            ),
+            target_kind="UNKNOWN",
+            target_name="",
+            namespace=context.namespace,
+            solves_root_cause=False,
+            executable=False,
+            policy_reason="Unknown candidate IDs are recommendation-only.",
+        )
+
+    def _policy_risk(
+        self,
+        action_type: str,
+        risk_level: str,
+        candidate: RemediationCandidate,
+    ) -> str:
+        """Apply local risk overrides independent of the LLM's assessment."""
+        if RISK_ORDER[risk_level] < RISK_ORDER[candidate.risk_level]:
+            risk_level = candidate.risk_level
+        minimum_risk = {
+            "DELETE_POD": "MEDIUM",
+            "RESTART_DEPLOYMENT": "MEDIUM",
+        }.get(action_type)
+        if action_type == "NO_ACTION":
+            return risk_level
+        if minimum_risk is None:
+            return "HIGH"
+        if RISK_ORDER[risk_level] < RISK_ORDER[minimum_risk]:
+            return minimum_risk
+        return risk_level
+
+    def _execution_policy(
+        self,
+        candidate: RemediationCandidate,
+        action_type: str,
+        risk_level: str,
+        context: InvestigationContext,
+    ) -> tuple[bool, str]:
+        """Decide whether an action may be offered for execution."""
+        if risk_level == "HIGH":
+            return False, "High-risk actions are recommendation-only."
+        if not candidate.solves_root_cause:
+            return False, "Candidate is only a mitigation and does not solve root cause."
+        if not candidate.executable:
+            return False, "Candidate is recommendation-only."
+        if action_type == "NO_ACTION":
+            return False, "No executable remediation action was recommended."
+        if action_type not in SUPPORTED_ACTION_TYPES:
+            return False, "Unsupported action type."
+        if candidate.namespace != context.namespace:
+            return False, "Action namespace does not match investigated namespace."
+        if not candidate.target_name:
+            return False, "Action target name is missing."
+        if action_type == "DELETE_POD":
+            if self._normalize_kind(candidate.target_kind) != "POD":
+                return False, "DELETE_POD requires target_kind Pod."
+            if candidate.target_name != context.pod_name:
+                return False, "DELETE_POD is limited to the investigated pod."
+        if (
+            action_type == "RESTART_DEPLOYMENT"
+            and self._normalize_kind(candidate.target_kind) != "DEPLOYMENT"
+        ):
+            return False, "RESTART_DEPLOYMENT requires target_kind Deployment."
+
+        return True, "Action is eligible for user-approved execution."
+
+    def _normalize(self, value: Any) -> str:
+        """Normalize an enum-like string from LLM output."""
+        return str(value or "").strip().upper()
+
+    def _normalize_kind(self, value: Any) -> str:
+        """Normalize Kubernetes kind names for policy checks."""
+        return str(value or "").strip().upper()

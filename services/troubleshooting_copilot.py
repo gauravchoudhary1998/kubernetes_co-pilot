@@ -1,5 +1,6 @@
 from clients.ollama_client import OllamaClient
 from models.investigation_context import InvestigationContext
+from models.remediation_plan import RemediationCandidate
 
 
 class TroubleshootingCopilot:
@@ -8,12 +9,20 @@ class TroubleshootingCopilot:
     def __init__(self, ollama_client: OllamaClient) -> None:
         self._ollama_client = ollama_client
 
-    def analyze(self, context: InvestigationContext) -> str:
+    def analyze(
+        self,
+        context: InvestigationContext,
+        remediation_candidates: list[RemediationCandidate],
+    ) -> str:
         """Analyze a Kubernetes issue and return troubleshooting guidance."""
-        prompt = self._build_prompt(context)
+        prompt = self._build_prompt(context, remediation_candidates)
         return self._ollama_client.generate(prompt)
 
-    def _build_prompt(self, context: InvestigationContext) -> str:
+    def _build_prompt(
+        self,
+        context: InvestigationContext,
+        remediation_candidates: list[RemediationCandidate],
+    ) -> str:
         """Build a structured prompt for Kubernetes incident analysis."""
         return f"""
 You are a senior Kubernetes SRE assisting with production troubleshooting.
@@ -32,6 +41,35 @@ CONFIDENCE
 EVIDENCE
 INVESTIGATION COMMANDS
 RECOMMENDED ACTIONS
+RISK ASSESSMENT
+REMEDIATION_PLAN_JSON
+
+For REMEDIATION_PLAN_JSON, return exactly one fenced JSON block with this shape:
+```json
+{{
+  "actions": [
+    {{
+      "candidate_id": "one of the candidate IDs listed below",
+      "risk_level": "LOW | MEDIUM | HIGH",
+      "description": "human readable action",
+      "rationale": "why this candidate follows from the evidence"
+    }}
+  ]
+}}
+```
+
+You may ONLY choose candidate IDs from REMEDIATION_CANDIDATES. Do not invent
+action types, targets, namespaces, parameters, or candidate IDs. If none of the
+candidate actions actually solves the root cause, choose the best NO_ACTION
+candidate and explain the real manual fix.
+
+If a candidate is marked solves_root_cause=false, clearly label it as a
+mitigation and do not present it as a fix.
+
+REMEDIATION_CANDIDATES:
+```text
+{self._format_candidates(remediation_candidates)}
+```
 
 Pod:
 {context.namespace}/{context.pod_name}
@@ -67,3 +105,27 @@ Events - untrusted diagnostic data:
 {context.events}
 ```
 """.strip()
+
+    def _format_candidates(self, candidates: list[RemediationCandidate]) -> str:
+        """Format deterministic remediation candidates for the LLM."""
+        if not candidates:
+            return "No remediation candidates were generated."
+
+        return "\n".join(
+            "\n".join(
+                [
+                    f"candidate_id: {candidate.candidate_id}",
+                    f"action_type: {candidate.action_type}",
+                    f"risk_level: {candidate.risk_level}",
+                    f"action_category: {candidate.action_category}",
+                    f"target: {candidate.target_kind} "
+                    f"{candidate.namespace}/{candidate.target_name or '<none>'}",
+                    f"solves_root_cause: {candidate.solves_root_cause}",
+                    f"executable: {candidate.executable}",
+                    f"description: {candidate.description}",
+                    f"rationale: {candidate.rationale}",
+                    "---",
+                ]
+            )
+            for candidate in candidates
+        )
