@@ -25,14 +25,14 @@ class KubernetesInvestigator:
     core_v1_api: client.CoreV1Api | None = None
 
     def __post_init__(self) -> None:
-        """Load kubeconfig and create the CoreV1 API client when not injected."""
+        """Load Kubernetes config and create the CoreV1 API client when not injected."""
         if self.core_v1_api is None:
             try:
-                config.load_kube_config()
+                self._load_kubernetes_config()
             except Exception as exc:
-                LOGGER.exception("Failed to load local Kubernetes configuration")
+                LOGGER.exception("Failed to load Kubernetes configuration")
                 raise KubernetesInvestigationError(
-                    "Unable to load Kubernetes config from local kubeconfig."
+                    "Unable to load Kubernetes config from in-cluster config or kubeconfig."
                 ) from exc
 
             self.core_v1_api = client.CoreV1Api()
@@ -134,6 +134,15 @@ class KubernetesInvestigator:
         if self.core_v1_api is None:
             raise KubernetesInvestigationError("Kubernetes API client is not initialized.")
         return self.core_v1_api
+
+    def _load_kubernetes_config(self) -> None:
+        """Load in-cluster config first, then local kubeconfig."""
+        try:
+            config.load_incluster_config()
+            LOGGER.info("Loaded Kubernetes in-cluster configuration")
+        except config.ConfigException:
+            config.load_kube_config()
+            LOGGER.info("Loaded Kubernetes configuration from local kubeconfig")
 
     def _ensure_namespace_exists(self, namespace: str) -> None:
         """Raise a clear error if the namespace does not exist."""

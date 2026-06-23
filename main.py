@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 
 from clients.ollama_client import OllamaClient
 from models.remediation_plan import RemediationPlan
@@ -18,6 +19,7 @@ from services.troubleshooting_copilot import TroubleshootingCopilot
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_TOKEN = ""
 
 
 def main() -> None:
@@ -28,6 +30,7 @@ def main() -> None:
     ollama_client = OllamaClient(
         base_url=args.base_url,
         model=args.model,
+        token=args.token,
     )
     copilot = TroubleshootingCopilot(ollama_client=ollama_client)
     investigator = KubernetesInvestigator()
@@ -63,8 +66,21 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyze Kubernetes troubleshooting context with local Ollama."
     )
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Ollama base URL.")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model name.")
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("OLLAMA_BASE_URL", DEFAULT_BASE_URL),
+        help="Ollama base URL.",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.getenv("OLLAMA_MODEL", DEFAULT_MODEL),
+        help="Ollama model name.",
+    )
+    parser.add_argument(
+        "--token",
+        default=os.getenv("OLLAMA_TOKEN", DEFAULT_TOKEN),
+        help="Bearer token for Ollama-compatible LLM endpoint.",
+    )
     parser.add_argument(
         "--verbose",
         action="store_true",

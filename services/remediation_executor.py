@@ -25,14 +25,14 @@ class RemediationExecutor:
     apps_v1_api: client.AppsV1Api | None = None
 
     def __post_init__(self) -> None:
-        """Load kubeconfig and create Kubernetes API clients when not injected."""
+        """Load Kubernetes config and create API clients when not injected."""
         if self.core_v1_api is None or self.apps_v1_api is None:
             try:
-                config.load_kube_config()
+                self._load_kubernetes_config()
             except Exception as exc:
-                LOGGER.exception("Failed to load local Kubernetes configuration")
+                LOGGER.exception("Failed to load Kubernetes configuration")
                 raise RemediationExecutionError(
-                    "Unable to load Kubernetes config from local kubeconfig."
+                    "Unable to load Kubernetes config from in-cluster config or kubeconfig."
                 ) from exc
 
         if self.core_v1_api is None:
@@ -131,6 +131,15 @@ class RemediationExecutor:
         if self.core_v1_api is None:
             raise RemediationExecutionError("CoreV1 API client is not initialized.")
         return self.core_v1_api
+
+    def _load_kubernetes_config(self) -> None:
+        """Load in-cluster config first, then local kubeconfig."""
+        try:
+            config.load_incluster_config()
+            LOGGER.info("Loaded Kubernetes in-cluster configuration")
+        except config.ConfigException:
+            config.load_kube_config()
+            LOGGER.info("Loaded Kubernetes configuration from local kubeconfig")
 
     @property
     def _apps_v1_api(self) -> client.AppsV1Api:

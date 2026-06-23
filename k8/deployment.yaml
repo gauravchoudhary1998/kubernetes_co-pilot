@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubernetes-copilot
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-copilot
+  namespace: kubernetes-copilot
+  labels:
+    app.kubernetes.io/name: kubernetes-copilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubernetes-copilot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubernetes-copilot
+    spec:
+      serviceAccountName: kubernetes-copilot
+      containers:
+        - name: api
+          image: kubernetes-copilot:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama:11434"
+            - name: OLLAMA_MODEL
+              value: "qwen3:8b"
+            - name: OLLAMA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubernetes-copilot-llm
+                  key: token
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

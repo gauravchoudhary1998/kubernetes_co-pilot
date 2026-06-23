@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 from clients.ollama_client import OllamaClient
 from models.investigation_context import InvestigationContext
 from models.remediation_plan import RemediationCandidate
@@ -17,6 +19,15 @@ class TroubleshootingCopilot:
         """Analyze a Kubernetes issue and return troubleshooting guidance."""
         prompt = self._build_prompt(context, remediation_candidates)
         return self._ollama_client.generate(prompt)
+
+    def analyze_stream(
+        self,
+        context: InvestigationContext,
+        remediation_candidates: list[RemediationCandidate],
+    ) -> Iterator[str]:
+        """Yield LLM tokens as they arrive for a Kubernetes issue analysis."""
+        prompt = self._build_prompt(context, remediation_candidates)
+        yield from self._ollama_client.generate_stream(prompt)
 
     def _build_prompt(
         self,

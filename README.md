@@ -1,20 +1,20 @@
 # Kubernetes Troubleshooting Copilot
 
-Local, CLI-based Kubernetes pod troubleshooting assistant powered by Ollama and
-the Kubernetes Python SDK.
+API-based Kubernetes pod troubleshooting assistant powered by Ollama and the
+Kubernetes Python SDK.
 
-The app asks which pod is failing, automatically collects deterministic evidence
-from the active Kubernetes context, then asks a local LLM to analyze only that
-evidence. Python classifies the failure and generates bounded remediation
-candidates before the LLM responds, so the model can explain or select from
-known-safe options instead of inventing arbitrary actions.
+The API accepts a namespace and pod name, automatically collects deterministic
+evidence from the active Kubernetes context, then asks a local LLM to analyze
+only that evidence. Python classifies the failure and generates bounded
+remediation candidates before the LLM responds, so the model can explain or
+select from known-safe options instead of inventing arbitrary actions.
 
 ## Requirements
 
 - Python 3.12+
-- Ollama running locally at `http://localhost:11434`
+- Ollama reachable from the app
 - Ollama model `qwen3:8b`
-- Local kubeconfig with access to the target namespace and pod
+- Kubernetes access through in-cluster config or local kubeconfig
 
 ## Setup
 
@@ -31,24 +31,48 @@ ollama pull qwen3:8b
 ollama serve
 ```
 
-## Usage
+## API Usage
 
-Start the interactive troubleshooting session:
+Start the API locally:
 
 ```bash
-python main.py
+uvicorn api.app:app --host 0.0.0.0 --port 8080
 ```
 
-The prompts are:
+Create an investigation:
 
-```text
-Which namespace is the failing pod in?
->
-Which pod is failing?
->
+```bash
+curl -X POST http://localhost:8080/investigations \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":"default","pod_name":"my-pod-abc123"}'
 ```
 
-The investigator then gathers pod details, pod conditions, resource requests and
+The response includes:
+
+```json
+{
+  "investigation_id": "uuid",
+  "failure_class": "MISSING_CONFIG",
+  "analysis": "...",
+  "actions": []
+}
+```
+
+Execute an approved action by `candidate_id`:
+
+```bash
+curl -X POST \
+  http://localhost:8080/investigations/<investigation_id>/actions/<candidate_id>/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"approved":true}'
+```
+
+The executor only uses actions stored from the original investigation. The API
+does not accept arbitrary action targets or shell commands from clients.
+For the current simple in-memory implementation, creating a new investigation
+clears any previous stored investigation.
+
+The investigator gathers pod details, pod conditions, resource requests and
 limits, probes, volumes, tolerations, owner references, per-container status
 reasons, events, logs, and previous logs when the pod state calls for them.
 
@@ -84,13 +108,66 @@ failures, volume mount failures, and application crashes.
 Override Ollama settings if needed:
 
 ```bash
-python main.py --base-url http://localhost:11434 --model qwen3:8b
+OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=qwen3:8b \
+  uvicorn api.app:app --host 0.0.0.0 --port 8080
 ```
+
+The older CLI entrypoint is still available for local experimentation:
+
+```bash
+python main.py
+```
+
+## Docker
+
+Build the image:
+
+```bash
+docker build -t kubernetes-copilot:latest .
+```
+
+Run locally against a kubeconfig and local Ollama:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -e OLLAMA_MODEL=qwen3:8b \
+  -v "$HOME/.kube:/home/app/.kube:ro" \
+  kubernetes-copilot:latest
+```
+
+## Kubernetes Deployment
+
+Update `k8/deployment.yaml` with the image name pushed to your registry and an
+`OLLAMA_BASE_URL` reachable from inside the cluster.
+
+Apply the manifests:
+
+```bash
+kubectl apply -k k8/
+```
+
+Port-forward the API:
+
+```bash
+kubectl -n kubernetes-copilot port-forward svc/kubernetes-copilot 8080:80
+```
+
+The manifests create:
+
+- Namespace `kubernetes-copilot`
+- ServiceAccount `kubernetes-copilot`
+- ClusterRole and ClusterRoleBinding for pod evidence collection and approved remediation
+- Deployment for the FastAPI app
+- ClusterIP Service
 
 ## Project Structure
 
 ```text
 .
+├── api/
+│   ├── app.py
+│   └── schemas.py
 ├── clients/
 │   └── ollama_client.py
 ├── models/
@@ -101,7 +178,15 @@ python main.py --base-url http://localhost:11434 --model qwen3:8b
 │   ├── remediation_candidate_generator.py
 │   ├── remediation_executor.py
 │   ├── remediation_planner.py
+│   ├── investigation_service.py
 │   └── troubleshooting_copilot.py
+├── k8/
+│   ├── deployment.yaml
+│   ├── kustomization.yaml
+│   ├── rbac.yaml
+│   ├── service-account.yaml
+│   └── service.yaml
+├── Dockerfile
 ├── main.py
 ├── requirements.txt
 └── README.md
@@ -109,9 +194,11 @@ python main.py --base-url http://localhost:11434 --model qwen3:8b
 
 ## Notes
 
-This project intentionally uses a small, framework-free structure:
+This project intentionally uses a small, framework-light structure:
 
+- `api.app` exposes the HTTP API.
 - `OllamaClient` handles HTTP communication with Ollama.
+- `InvestigationService` coordinates investigation, analysis, and planning.
 - `KubernetesInvestigator` collects deterministic pod evidence through the Kubernetes SDK.
 - `InvestigationContext` stores collected pod evidence.
 - `RemediationCandidateGenerator` classifies failures and generates bounded remediation candidates.
@@ -124,4 +211,3 @@ evidence first, then the model analyzes that evidence. The LLM also does not
 invent executable actions or execute actions directly; Python generates and
 validates candidates, target, namespace, root-cause fit, and risk before asking
 the user for approval.
-
