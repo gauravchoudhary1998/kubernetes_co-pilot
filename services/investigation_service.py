@@ -7,18 +7,16 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from api.schemas import ActionResponse, InvestigationResponse
-from clients.litellm_client import LiteLLMClient
 from clients.ollama_client import OllamaClient
 from models.investigation_context import InvestigationContext
 from models.remediation_plan import RemediationAction, RemediationPlan
 from services.kubernetes_investigator import KubernetesInvestigationError, KubernetesInvestigator
 from services.remediation_candidate_generator import RemediationCandidateGenerator
 from services.remediation_planner import RemediationPlanner
-from services.troubleshooting_copilot import LLMClient, TroubleshootingCopilot
+from services.troubleshooting_copilot import TroubleshootingCopilot
 
 
-DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_LITELLM_BASE_URL = "http://localhost:4000"
+DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:8b"
 DEFAULT_TOKEN = ""
 
@@ -36,31 +34,18 @@ class InvestigationRecord:
 class InvestigationService:
     """Coordinates evidence collection, LLM analysis, and remediation planning."""
 
-    def __init__(self) -> None:
-        self._provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-        self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
-        self._ollama_model = os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
-        self._ollama_token = os.getenv("OLLAMA_TOKEN", DEFAULT_TOKEN)
-        self._litellm_base_url = os.getenv("LITELLM_BASE_URL", DEFAULT_LITELLM_BASE_URL)
-        self._litellm_model = os.getenv("LITELLM_MODEL", DEFAULT_MODEL)
-        self._litellm_token = os.getenv("LITELLM_TOKEN", DEFAULT_TOKEN)
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        self._base_url = base_url or os.getenv("OLLAMA_BASE_URL", DEFAULT_BASE_URL)
+        self._model = model or os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
+        self._token = token if token is not None else os.getenv("OLLAMA_TOKEN", DEFAULT_TOKEN)
         self._candidate_generator = RemediationCandidateGenerator()
         self._remediation_planner = RemediationPlanner()
         self._investigations: dict[str, InvestigationRecord] = {}
-
-    def _create_client(self) -> LLMClient:
-        """Return the configured LLM client based on LLM_PROVIDER."""
-        if self._provider == "litellm":
-            return LiteLLMClient(
-                base_url=self._litellm_base_url,
-                model=self._litellm_model,
-                token=self._litellm_token,
-            )
-        return OllamaClient(
-            base_url=self._ollama_base_url,
-            model=self._ollama_model,
-            token=self._ollama_token,
-        )
 
     def get_investigation(self, investigation_id: str) -> InvestigationRecord | None:
         """Return a stored investigation record, or None if not found."""
@@ -68,7 +53,12 @@ class InvestigationService:
 
     def investigate(self, namespace: str, pod_name: str) -> tuple[str, InvestigationRecord]:
         """Run a full investigation and return the stored record."""
-        copilot = TroubleshootingCopilot(llm_client=self._create_client())
+        ollama_client = OllamaClient(
+            base_url=self._base_url,
+            model=self._model,
+            token=self._token,
+        )
+        copilot = TroubleshootingCopilot(ollama_client=ollama_client)
         investigator = KubernetesInvestigator()
 
         context = investigator.investigate_pod(namespace=namespace, pod_name=pod_name)
@@ -93,7 +83,12 @@ class InvestigationService:
 
     def investigate_stream(self, namespace: str, pod_name: str) -> Iterator[str]:
         """Stream LLM tokens then yield the final investigation result as NDJSON."""
-        copilot = TroubleshootingCopilot(llm_client=self._create_client())
+        ollama_client = OllamaClient(
+            base_url=self._base_url,
+            model=self._model,
+            token=self._token,
+        )
+        copilot = TroubleshootingCopilot(ollama_client=ollama_client)
         investigator = KubernetesInvestigator()
 
         try:
