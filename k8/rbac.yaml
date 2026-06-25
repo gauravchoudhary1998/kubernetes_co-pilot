@@ -23,7 +23,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: kubernetes-copilot
-    namespace: dev
+    namespace: kubernetes-copilot
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
