@@ -2,10 +2,7 @@ FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    APP_HOME=/app \
-    LLM_PROVIDER=litellm \
-    LITELLM_BASE_URL=http://litellm:4000 \
-    LITELLM_MODEL=qwen3:8b
+    APP_HOME=/app
 
 WORKDIR ${APP_HOME}
 
