@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +47,10 @@ class LiteLLMClient:
             return f"LiteLLM returned an HTTP error: {status_code}."
         except requests.RequestException as exc:
             return f"LiteLLM request failed: {exc}."
+
+    def generate_stream(self, prompt: str) -> Iterator[str]:
+        """Yield the full response as a single chunk (LiteLLM non-streaming fallback)."""
+        yield self.generate(prompt)
 
     def _headers(self) -> dict[str, str]:
         """Build request headers for LiteLLM calls."""
