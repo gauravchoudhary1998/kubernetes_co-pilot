@@ -32,7 +32,7 @@ def main() -> None:
         model=args.model,
         token=args.token,
     )
-    copilot = TroubleshootingCopilot(ollama_client=ollama_client)
+    copilot = TroubleshootingCopilot(llm_client=ollama_client)
     investigator = KubernetesInvestigator()
     candidate_generator = RemediationCandidateGenerator()
     remediation_planner = RemediationPlanner()
