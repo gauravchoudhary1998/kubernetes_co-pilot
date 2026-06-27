@@ -1,126 +1,145 @@
 # Kubernetes Troubleshooting Copilot
 
-API-based Kubernetes pod troubleshooting assistant powered by Ollama and the
-Kubernetes Python SDK.
+API and MCP server for investigating failing Kubernetes pods. Collects deterministic evidence from the cluster, analyzes it with a local LLM (Ollama), and automatically executes low-risk remediation actions. Supports investigating multiple clusters from a single deployment.
 
-The API accepts a namespace and pod name, automatically collects deterministic
-evidence from the active Kubernetes context, then asks a local LLM to analyze
-only that evidence. Python classifies the failure and generates bounded
-remediation candidates before the LLM responds, so the model can explain or
-select from known-safe options instead of inventing arbitrary actions.
+## How it works
+
+1. Receives a pod investigation request (namespace, pod name, optional cluster name)
+2. Collects evidence from Kubernetes: pod status, conditions, resource limits, probes, volumes, owner references, per-container status, events, logs, and previous logs
+3. Classifies the failure deterministically (Python policy, not LLM)
+4. Generates bounded remediation candidates from the classification
+5. Sends evidence + candidates to a local LLM for analysis
+6. LLM selects from the generated candidates — it cannot invent arbitrary actions
+7. Auto-executes any action that is low-risk and eligible; high-risk actions are recommendations only
 
 ## Requirements
 
-- Python 3.12+
-- Ollama reachable from the app
-- Ollama model `qwen3:8b`
-- Kubernetes access through in-cluster config or local kubeconfig
+- Python 3.14
+- Ollama running with `qwen3:8b`
+- Kubernetes access via in-cluster config or local kubeconfig
 
 ## Setup
 
-Install Python dependencies:
-
 ```bash
 pip install -r requirements.txt
-```
-
-Install and run the local model:
-
-```bash
 ollama pull qwen3:8b
-ollama serve
 ```
 
-## API Usage
+## REST API
 
-Start the API locally:
+Start the server:
 
 ```bash
 uvicorn api.app:app --host 0.0.0.0 --port 8080
 ```
 
-Create an investigation:
+### Investigate a pod (streaming NDJSON)
 
 ```bash
-curl -X POST http://localhost:8080/investigations \
+curl -N -X POST http://localhost:8080/investigations \
   -H 'Content-Type: application/json' \
-  -d '{"namespace":"default","pod_name":"my-pod-abc123"}'
+  -d '{"namespace": "dev", "pod_name": "my-pod-abc123"}'
 ```
 
-The response includes:
+To investigate a remote cluster, include `cluster_name` (must match a context in the mounted kubeconfig):
+
+```bash
+curl -N -X POST http://localhost:8080/investigations \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace": "prod", "pod_name": "my-pod", "cluster_name": "prod-cluster"}'
+```
+
+The response is a stream of NDJSON events:
+
+```
+{"type": "token", "content": "..."}        ← LLM tokens as they arrive
+{"type": "action_executed", ...}           ← emitted if a low-risk action ran
+{"type": "result", "investigation_id": "...", "cluster_name": null, "failure_class": "OOM_KILLED", "analysis": "...", "actions": [...]}
+```
+
+### Health check
+
+```bash
+curl http://localhost:8080/healthz
+```
+
+## MCP Server
+
+The copilot exposes a single MCP tool — `investigate_pod` — usable by any MCP-compatible agent.
+
+### Claude Desktop (stdio, no server needed)
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
-  "investigation_id": "uuid",
-  "failure_class": "MISSING_CONFIG",
-  "analysis": "...",
-  "actions": []
+  "mcpServers": {
+    "kubernetes-copilot": {
+      "command": "/path/to/venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "env": {
+        "PYTHONPATH": "/path/to/kubernetes-co-pilot"
+      }
+    }
+  }
 }
 ```
 
-Execute an approved action by `candidate_id`:
+Restart Claude Desktop. The `investigate_pod` tool will appear in the chat interface.
 
-```bash
-curl -X POST \
-  http://localhost:8080/investigations/<investigation_id>/actions/<candidate_id>/execute \
-  -H 'Content-Type: application/json' \
-  -d '{"approved":true}'
+### In-cluster agents (HTTP)
+
+When deployed to Kubernetes, the MCP server is reachable at:
+
+```
+http://kubernetes-copilot.dev.svc.cluster.local/mcp
 ```
 
-The executor only uses actions stored from the original investigation. The API
-does not accept arbitrary action targets or shell commands from clients.
-For the current simple in-memory implementation, creating a new investigation
-clears any previous stored investigation.
+Connect from any MCP-compatible agent:
 
-The investigator gathers pod details, pod conditions, resource requests and
-limits, probes, volumes, tolerations, owner references, per-container status
-reasons, events, logs, and previous logs when the pod state calls for them.
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
-After analysis, remediation handling follows this policy:
-
-- Python generates remediation candidates from deterministic failure classification.
-- The LLM may only select candidate IDs generated by Python.
-- High-risk actions are shown as recommendations only.
-- Medium-risk and low-risk actions require explicit user approval.
-- Only allowlisted Kubernetes SDK actions can execute.
-- Arbitrary shell commands or free-form LLM instructions are never executed.
-
-Known failure classes include:
-
-- `MISSING_CONFIG`
-- `IMAGE_PULL_FAILURE`
-- `OOM_KILLED`
-- `PROBE_FAILURE`
-- `SCHEDULING_FAILURE`
-- `VOLUME_MOUNT_FAILURE`
-- `CRASHING_APPLICATION`
-- `UNKNOWN`
-
-Executable actions are intentionally conservative. Current executor support:
-
-- `DELETE_POD`: only for the investigated pod, and only when it has an owner reference.
-- `RESTART_DEPLOYMENT`: triggers a Deployment rollout restart by patching the pod template annotation.
-
-Recommendation-only candidates are used when automation would not solve the
-root cause, such as missing config, image pull failures, OOM kills, scheduling
-failures, volume mount failures, and application crashes.
-
-Override Ollama settings if needed:
-
-```bash
-OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=qwen3:8b \
-  uvicorn api.app:app --host 0.0.0.0 --port 8080
+async with streamablehttp_client("http://kubernetes-copilot.dev.svc.cluster.local/mcp") as (r, w, _):
+    async with ClientSession(r, w) as session:
+        await session.initialize()
+        result = await session.call_tool("investigate_pod", {
+            "namespace": "dev",
+            "pod_name": "my-pod",
+            "cluster_name": "prod-cluster",  # optional
+        })
 ```
 
-The older CLI entrypoint is still available for local experimentation:
+## Remediation policy
 
-```bash
-python main.py
-```
+- Python classifies the failure and generates candidates before the LLM responds
+- The LLM may only select candidate IDs generated by Python — no invented actions
+- **Low-risk, eligible actions are auto-executed** — no user approval required
+- **High-risk actions are recommendations only** — never executed automatically
+- Only allowlisted Kubernetes SDK calls can execute (no shell commands)
+
+Executable actions:
+- `DELETE_POD` — only for the investigated pod, only when it has an owner reference
+- `RESTART_DEPLOYMENT` — patches the pod template annotation to trigger a rollout restart
+
+All other failure classes (missing config, image pull failures, OOM kills, scheduling failures, volume mount failures, application crashes) produce recommendation-only candidates.
+
+Known failure classes:
+`MISSING_CONFIG`, `IMAGE_PULL_FAILURE`, `OOM_KILLED`, `PROBE_FAILURE`, `SCHEDULING_FAILURE`, `VOLUME_MOUNT_FAILURE`, `CRASHING_APPLICATION`, `UNKNOWN`
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
+| `OLLAMA_MODEL` | `qwen3:8b` | Model to use |
+| `OLLAMA_TOKEN` | _(empty)_ | Bearer token for Ollama-compatible endpoints |
+| `KUBECONFIG` | `/app/.kube/config` | Path to kubeconfig for remote cluster access |
 
 ## Docker
 
-Build the image:
+Build:
 
 ```bash
 docker build -t kubernetes-copilot:latest .
@@ -131,55 +150,76 @@ Run locally against a kubeconfig and local Ollama:
 ```bash
 docker run --rm -p 8080:8080 \
   -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
-  -e OLLAMA_MODEL=qwen3:8b \
   -v "$HOME/.kube:/home/app/.kube:ro" \
   kubernetes-copilot:latest
 ```
 
 ## Kubernetes Deployment
 
-Update `k8/deployment.yaml` with the image name pushed to your registry and an
-`OLLAMA_BASE_URL` reachable from inside the cluster.
-
-Apply the manifests:
+### Single cluster
 
 ```bash
-kubectl apply -k k8/
+kubectl apply -f k8/service-account.yaml
+kubectl apply -f k8/rbac.yaml
+kubectl apply -f k8/deployment.yaml
+kubectl apply -f k8/service.yaml
 ```
 
-Port-forward the API:
+The pod uses its own ServiceAccount token (in-cluster config) to access the cluster it runs in. No kubeconfig Secret is needed for single-cluster use.
+
+### Multi-cluster
+
+For each remote cluster, apply the same RBAC:
 
 ```bash
-kubectl -n kubernetes-copilot port-forward svc/kubernetes-copilot 8080:80
+kubectl apply -f k8/service-account.yaml --context=<remote-cluster>
+kubectl apply -f k8/rbac.yaml --context=<remote-cluster>
 ```
 
-The manifests create:
+Merge kubeconfigs and store as a Secret in the home cluster:
 
-- Namespace `kubernetes-copilot`
-- ServiceAccount `kubernetes-copilot`
-- ClusterRole and ClusterRoleBinding for pod evidence collection and approved remediation
-- Deployment for the FastAPI app
-- ClusterIP Service
+```bash
+KUBECONFIG=~/.kube/config:~/.kube/remote.kubeconfig \
+  kubectl config view --flatten > merged.kubeconfig
 
-## Project Structure
+kubectl create secret generic kubernetes-copilot-kubeconfig \
+  --from-file=config=merged.kubeconfig \
+  -n dev
+```
 
-```text
+The context names in the merged kubeconfig are what callers pass as `cluster_name`.
+
+### Access
+
+The service is `ClusterIP` — reachable within the cluster at:
+
+```
+http://kubernetes-copilot.dev.svc.cluster.local
+http://kubernetes-copilot.dev.svc.cluster.local/mcp   ← MCP endpoint
+```
+
+## Project structure
+
+```
 .
 ├── api/
-│   ├── app.py
-│   └── schemas.py
+│   ├── app.py                       FastAPI app — REST + MCP mount
+│   └── schemas.py                   Request/response models
 ├── clients/
-│   └── ollama_client.py
+│   └── ollama_client.py             Ollama HTTP client (streaming + non-streaming)
+├── mcp_server/
+│   └── server.py                    FastMCP server — investigate_pod tool
 ├── models/
-│   ├── investigation_context.py
-│   └── remediation_plan.py
+│   ├── investigation_context.py     Collected pod evidence
+│   └── remediation_plan.py          Remediation candidates, actions, results
 ├── services/
-│   ├── kubernetes_investigator.py
-│   ├── remediation_candidate_generator.py
-│   ├── remediation_executor.py
-│   ├── remediation_planner.py
-│   ├── investigation_service.py
-│   └── troubleshooting_copilot.py
+│   ├── cluster_registry.py          ApiClient factory for multi-cluster access
+│   ├── investigation_service.py     Orchestrates the full investigation pipeline
+│   ├── kubernetes_investigator.py   Collects pod evidence from the cluster
+│   ├── remediation_candidate_generator.py  Deterministic failure classification
+│   ├── remediation_executor.py      Executes allowlisted Kubernetes SDK actions
+│   ├── remediation_planner.py       Validates LLM-selected actions against policy
+│   └── troubleshooting_copilot.py   Builds LLM prompt and streams the response
 ├── k8/
 │   ├── deployment.yaml
 │   ├── kustomization.yaml
@@ -187,27 +227,6 @@ The manifests create:
 │   ├── service-account.yaml
 │   └── service.yaml
 ├── Dockerfile
-├── main.py
-├── requirements.txt
-└── README.md
+├── main.py                          CLI entrypoint for local experimentation
+└── requirements.txt
 ```
-
-## Notes
-
-This project intentionally uses a small, framework-light structure:
-
-- `api.app` exposes the HTTP API.
-- `OllamaClient` handles HTTP communication with Ollama.
-- `InvestigationService` coordinates investigation, analysis, and planning.
-- `KubernetesInvestigator` collects deterministic pod evidence through the Kubernetes SDK.
-- `InvestigationContext` stores collected pod evidence.
-- `RemediationCandidateGenerator` classifies failures and generates bounded remediation candidates.
-- `TroubleshootingCopilot` builds the LLM prompt and returns the analysis.
-- `RemediationPlanner` validates LLM-selected candidate IDs and applies local risk policy.
-- `RemediationExecutor` executes only allowlisted Kubernetes SDK actions after approval.
-
-The LLM does not decide what cluster data to collect. Python code gathers the
-evidence first, then the model analyzes that evidence. The LLM also does not
-invent executable actions or execute actions directly; Python generates and
-validates candidates, target, namespace, root-cause fit, and risk before asking
-the user for approval.
