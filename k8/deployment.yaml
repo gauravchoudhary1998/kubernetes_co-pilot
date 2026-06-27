@@ -34,6 +34,12 @@ spec:
                   name: kubernetes-copilot-llm
                   key: token
                   optional: true
+            - name: KUBECONFIG
+              value: "/app/.kube/config"
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /app/.kube
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -53,3 +59,8 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: kubeconfig
+          secret:
+            secretName: kubernetes-copilot-kubeconfig
+            optional: true

@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY api ./api
 COPY clients ./clients
 COPY models ./models
+COPY mcp_server ./mcp_server
 COPY services ./services
 COPY main.py .
 

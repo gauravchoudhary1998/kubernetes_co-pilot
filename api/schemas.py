@@ -8,6 +8,7 @@ class InvestigationRequest(BaseModel):
 
     namespace: str = Field(min_length=1)
     pod_name: str = Field(min_length=1)
+    cluster_name: str | None = None
 
 
 class ActionResponse(BaseModel):
@@ -31,22 +32,10 @@ class InvestigationResponse(BaseModel):
     """Response for a pod investigation."""
 
     investigation_id: str
+    cluster_name: str | None
     namespace: str
     pod_name: str
     failure_class: str
     analysis: str
     actions: list[ActionResponse]
     remediation_parse_error: str = ""
-
-
-class ExecuteActionRequest(BaseModel):
-    """Request to execute a stored remediation action."""
-
-    approved: bool = False
-
-
-class ExecuteActionResponse(BaseModel):
-    """Response after attempting action execution."""
-
-    success: bool
-    message: str
